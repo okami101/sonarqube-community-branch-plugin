@@ -26,7 +26,7 @@ jobs:
   release:
     if: >-
       github.event.workflow_run.conclusion == 'success' &&
-      github.event.workflow_run.event == 'push' &&
+      (github.event.workflow_run.event == 'push' || github.event.workflow_run.event == 'workflow_dispatch') &&
       github.event.workflow_run.head_repository.full_name == github.repository
     runs-on: ubuntu-latest
     env:
@@ -78,18 +78,29 @@ jobs:
           TAG: ${{ steps.versions.outputs.tag }}
           NOTES: "Community Branch Plugin ${{ steps.versions.outputs.plugin }} for SonarQube ${{ steps.versions.outputs.sonarqube }} (commit ${{ github.event.workflow_run.head_sha }})."
         run: |
-          if gh release view "${TAG}" > /dev/null 2>&1; then
-            echo "Updating release ${TAG} to ${SHA}"
+          # Point the tag at the built commit, creating it if needed. Done
+          # before the release, as `gh release create` ignores --target when
+          # the tag already exists.
+          if gh api "repos/${GH_REPO}/git/ref/tags/${TAG}" > /dev/null 2>&1; then
+            echo "Moving tag ${TAG} to ${SHA}"
             gh api -X PATCH "repos/${GH_REPO}/git/refs/tags/${TAG}" \
               -f sha="${SHA}" -F force=true > /dev/null
+          else
+            echo "Creating tag ${TAG} on ${SHA}"
+            gh api -X POST "repos/${GH_REPO}/git/refs" \
+              -f ref="refs/tags/${TAG}" -f sha="${SHA}" > /dev/null
+          fi
+
+          if gh release view "${TAG}" > /dev/null 2>&1; then
+            echo "Updating release ${TAG}"
             gh release edit "${TAG}" --notes "${NOTES}"
             gh release upload "${TAG}" --clobber \
               dist/sonarqube-community-branch-plugin.jar \
               dist/sonarqube-webapp.zip
           else
-            echo "Creating release ${TAG} on ${SHA}"
+            echo "Creating release ${TAG}"
             gh release create "${TAG}" \
-              --target "${SHA}" \
+              --verify-tag \
               --title "${TAG}" \
               --notes "${NOTES}" \
               dist/sonarqube-community-branch-plugin.jar \
