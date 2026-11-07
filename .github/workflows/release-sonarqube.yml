@@ -1,17 +1,19 @@
 name: release-sonarqube
 
-# Manually publishes a GitHub release tagged with the targeted SonarQube
-# version (e.g. 26.11), read from .env. The release holds:
+# On every push to master, publishes a GitHub release tagged with the
+# targeted SonarQube version (e.g. 26.11), read from .env. If the release
+# already exists, its tag is moved to the new commit and its assets replaced.
+# The release holds:
 #   - sonarqube-community-branch-plugin.jar
 #   - sonarqube-webapp.zip
 
 on:
+  push:
+    branches:
+      - master
+    paths-ignore:
+      - '**.md'
   workflow_dispatch:
-    inputs:
-      overwrite:
-        description: 'Replace the release (and move its tag) if it already exists'
-        type: boolean
-        default: false
 
 permissions:
   contents: write
@@ -140,21 +142,24 @@ jobs:
           path: dist
           merge-multiple: true
       -
-        name: Handle existing release
+        name: Create or update release
+        env:
+          NOTES: "Community Branch Plugin ${{ needs.prep.outputs.plugin }} for SonarQube ${{ needs.prep.outputs.sonarqube }} (commit ${{ github.sha }})."
         run: |
           if gh release view "${TAG}" > /dev/null 2>&1; then
-            if [[ "${{ inputs.overwrite }}" != "true" ]]; then
-              echo "::error::Release ${TAG} already exists. Re-run with 'overwrite' checked to replace it."
-              exit 1
-            fi
-            gh release delete "${TAG}" --cleanup-tag --yes
+            echo "Updating release ${TAG} to ${GITHUB_SHA}"
+            gh api -X PATCH "repos/${GH_REPO}/git/refs/tags/${TAG}" \
+              -f sha="${GITHUB_SHA}" -F force=true > /dev/null
+            gh release edit "${TAG}" --notes "${NOTES}"
+            gh release upload "${TAG}" --clobber \
+              dist/sonarqube-community-branch-plugin.jar \
+              dist/sonarqube-webapp.zip
+          else
+            echo "Creating release ${TAG} on ${GITHUB_SHA}"
+            gh release create "${TAG}" \
+              --target "${GITHUB_SHA}" \
+              --title "${TAG}" \
+              --notes "${NOTES}" \
+              dist/sonarqube-community-branch-plugin.jar \
+              dist/sonarqube-webapp.zip
           fi
-      -
-        name: Create release
-        run: |
-          gh release create "${TAG}" \
-            --target "${GITHUB_SHA}" \
-            --title "${TAG}" \
-            --notes "Community Branch Plugin ${{ needs.prep.outputs.plugin }} for SonarQube ${{ needs.prep.outputs.sonarqube }}." \
-            dist/sonarqube-community-branch-plugin.jar \
-            dist/sonarqube-webapp.zip
