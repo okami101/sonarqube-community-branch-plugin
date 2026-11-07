@@ -1,0 +1,160 @@
+name: release-sonarqube
+
+# Manually publishes a GitHub release tagged with the targeted SonarQube
+# version (e.g. 26.11), read from .env. The release holds:
+#   - sonarqube-community-branch-plugin.jar
+#   - sonarqube-webapp.zip
+
+on:
+  workflow_dispatch:
+    inputs:
+      overwrite:
+        description: 'Replace the release (and move its tag) if it already exists'
+        type: boolean
+        default: false
+
+permissions:
+  contents: write
+
+concurrency:
+  group: release-sonarqube
+  cancel-in-progress: false
+
+jobs:
+  prep:
+    runs-on: ubuntu-latest
+    outputs:
+      tag: ${{ steps.versions.outputs.tag }}
+      sonarqube: ${{ steps.versions.outputs.sonarqube }}
+      plugin: ${{ steps.versions.outputs.plugin }}
+    steps:
+      -
+        name: Checkout
+        uses: actions/checkout@v7
+      -
+        name: Read versions
+        id: versions
+        run: |
+          SONARQUBE_VERSION=$(grep '^SONARQUBE_VERSION=' .env | cut -d'=' -f2)
+          SONARQUBE_VERSION=${SONARQUBE_VERSION%-community}
+          TAG=$(echo "${SONARQUBE_VERSION}" | cut -d'.' -f1,2)
+          PLUGIN_VERSION=$(grep '^version=' gradle.properties | cut -d'=' -f2)
+          PLUGIN_VERSION=${PLUGIN_VERSION%-SNAPSHOT}
+          {
+            echo "tag=${TAG}"
+            echo "sonarqube=${SONARQUBE_VERSION}"
+            echo "plugin=${PLUGIN_VERSION}"
+          } >> "$GITHUB_OUTPUT"
+          echo "Release ${TAG}: SonarQube ${SONARQUBE_VERSION}, plugin ${PLUGIN_VERSION}"
+
+  build-plugin:
+    needs: prep
+    runs-on: ubuntu-latest
+    steps:
+      -
+        name: Checkout
+        uses: actions/checkout@v7
+      -
+        name: Set up Java
+        uses: actions/setup-java@v6
+        with:
+          java-version: 21
+          java-package: jdk
+          distribution: 'temurin'
+      -
+        name: Cache deps
+        uses: actions/cache@v6
+        with:
+          path: ~/.gradle/caches
+          key: ${{ runner.os }}-gradle-${{ hashFiles('**/*.gradle*') }}
+          restore-keys: |
+            ${{ runner.os }}-gradle-
+      -
+        name: Build and test
+        run: ./gradlew clean build -Pversion=${{ needs.prep.outputs.plugin }}
+      -
+        name: Rename jar
+        run: |
+          mkdir dist
+          cp build/libs/sonarqube-community-branch-plugin-${{ needs.prep.outputs.plugin }}.jar \
+             dist/sonarqube-community-branch-plugin.jar
+      -
+        name: Archive artifact
+        uses: actions/upload-artifact@v7
+        with:
+          name: plugin
+          path: dist/sonarqube-community-branch-plugin.jar
+          if-no-files-found: error
+
+  build-ui:
+    needs: prep
+    runs-on: ubuntu-latest
+    steps:
+      -
+        name: Checkout
+        uses: actions/checkout@v7
+        with:
+          submodules: true
+      -
+        name: Setup Node.js
+        uses: actions/setup-node@v7
+        with:
+          node-version: 24
+          cache: 'yarn'
+          cache-dependency-path: sonarqube-webapp/yarn.lock
+      -
+        name: Set up symlink
+        run: ./sonarqube-webapp-addons/setup.sh
+      -
+        name: Install dependencies
+        working-directory: sonarqube-webapp
+        run: yarn install --no-immutable
+      -
+        name: Build frontend
+        working-directory: sonarqube-webapp
+        run: yarn nx run sq-server:build
+      -
+        name: Create zip
+        working-directory: sonarqube-webapp/apps/sq-server/build/webapp
+        run: zip -r ${{ github.workspace }}/sonarqube-webapp.zip ./*
+      -
+        name: Archive artifact
+        uses: actions/upload-artifact@v7
+        with:
+          name: webapp
+          path: sonarqube-webapp.zip
+          if-no-files-found: error
+
+  release:
+    needs: [prep, build-plugin, build-ui]
+    runs-on: ubuntu-latest
+    env:
+      GH_TOKEN: ${{ github.token }}
+      GH_REPO: ${{ github.repository }}
+      TAG: ${{ needs.prep.outputs.tag }}
+    steps:
+      -
+        name: Download artifacts
+        uses: actions/download-artifact@v8
+        with:
+          path: dist
+          merge-multiple: true
+      -
+        name: Handle existing release
+        run: |
+          if gh release view "${TAG}" > /dev/null 2>&1; then
+            if [[ "${{ inputs.overwrite }}" != "true" ]]; then
+              echo "::error::Release ${TAG} already exists. Re-run with 'overwrite' checked to replace it."
+              exit 1
+            fi
+            gh release delete "${TAG}" --cleanup-tag --yes
+          fi
+      -
+        name: Create release
+        run: |
+          gh release create "${TAG}" \
+            --target "${GITHUB_SHA}" \
+            --title "${TAG}" \
+            --notes "Community Branch Plugin ${{ needs.prep.outputs.plugin }} for SonarQube ${{ needs.prep.outputs.sonarqube }}." \
+            dist/sonarqube-community-branch-plugin.jar \
+            dist/sonarqube-webapp.zip
