@@ -19,6 +19,8 @@ jobs:
     outputs:
       version: ${{ steps.init.outputs.version }}
       release: ${{ steps.init.outputs.release }}
+      sonarqube: ${{ steps.init.outputs.sonarqube }}
+      tag: ${{ steps.init.outputs.tag }}
     steps:
       -
         name: Checkout
@@ -34,6 +36,10 @@ jobs:
           else
             echo "release=false" >> $GITHUB_OUTPUT
           fi
+          SONARQUBE_VERSION=$(grep '^SONARQUBE_VERSION=' .env | cut -d'=' -f2)
+          SONARQUBE_VERSION=${SONARQUBE_VERSION%-community}
+          echo "sonarqube=${SONARQUBE_VERSION}" >> $GITHUB_OUTPUT
+          echo "tag=$(echo "${SONARQUBE_VERSION}" | cut -d'.' -f1,2)" >> $GITHUB_OUTPUT
 
   snapshot:
     needs: prep
@@ -107,73 +113,41 @@ jobs:
           path: sonarqube-webapp.zip
 
   release:
-    needs: [prep, build-ui]
-    if: github.event_name != 'pull_request' && needs.prep.outputs.release == 'true'
+    # Publishes the jar and webapp zip as the release of the targeted SonarQube
+    # version (e.g. 26.11, from .env). The tag follows the latest master commit.
+    needs: [prep, snapshot, build-ui]
+    if: github.ref == 'refs/heads/master' && github.event_name != 'pull_request'
     runs-on: ubuntu-latest
+    permissions:
+      contents: write
     steps:
       -
         name: Checkout
         uses: actions/checkout@v7
-        with:
-          fetch-depth: 0
       -
-        name: Set up Java
-        uses: actions/setup-java@v6
-        with:
-          java-version: 21
-          java-package: jdk
-          distribution: 'zulu'
-      -
-        name: Cache deps
-        uses: actions/cache@v6
-        with:
-          path: ~/.gradle/caches
-          key: ${{ runner.os }}-gradle-${{ hashFiles('**/*.gradle*') }}
-          restore-keys: |
-            ${{ runner.os }}-gradle-
-      -
-        name: Set up Git
-        run: |
-          git config user.name GitHub
-          git config user.email noreply@github.com
-          git remote set-url origin https://x-access-token:${GITHUB_TOKEN}@github.com/${GITHUB_REPOSITORY}.git
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-      -
-        name: Release
-        if: success()
-        run: |
-          ./gradlew clean release \
-            -Prelease.useAutomaticVersion=true \
-            -Prelease.releaseVersion=${{ needs.prep.outputs.version }}
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-      -
-        name: Archive artifact
-        if: success()
-        uses: actions/upload-artifact@v7
-        with:
-          name: release
-          path: build/libs/*.jar
-      -
-        name: Download frontend artifact
+        name: Download artifacts
         uses: actions/download-artifact@v8
         with:
-          name: webapp-build
-          path: build/ui
+          path: dist
+          merge-multiple: true
+      -
+        name: Rename jar
+        run: mv dist/sonarqube-community-branch-plugin-*.jar dist/sonarqube-community-branch-plugin.jar
+      -
+        name: Move tag
+        run: |
+          git tag -f ${{ needs.prep.outputs.tag }}
+          git push -f origin ${{ needs.prep.outputs.tag }}
       -
         name: GitHub Release
         uses: softprops/action-gh-release@v3
-        if: success()
         with:
-          name: ${{ needs.prep.outputs.version }}
-          tag_name: ${{ needs.prep.outputs.version }}
-          draft: true
+          tag_name: ${{ needs.prep.outputs.tag }}
+          name: ${{ needs.prep.outputs.tag }}
+          body: "Community Branch Plugin ${{ needs.prep.outputs.version }} for SonarQube ${{ needs.prep.outputs.sonarqube }} (commit ${{ github.sha }})."
           files: |
-            build/libs/*.jar
-            build/ui/sonarqube-webapp.zip
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+            dist/sonarqube-community-branch-plugin.jar
+            dist/sonarqube-webapp.zip
 
   sonar:
     needs: prep
